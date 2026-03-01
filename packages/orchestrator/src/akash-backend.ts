@@ -5,7 +5,14 @@
  * Uses the `provider-services` CLI binary for all chain transactions,
  * bypassing the akashjs SDK protobuf compatibility issues.
  *
+ * BME (Burn-Mint Equilibrium) Model:
+ *   - Deployments are priced in ACT (uact), not AKT (uakt)
+ *   - AKT is auto-minted into ACT via `akash tx bme mint-act` if needed
+ *   - Requires `akash` binary v2.1.0+ for BME commands
+ *   - Requires `provider-services` binary for deployment lifecycle
+ *
  * Deployment lifecycle:
+ *   0. Mint ACT from AKT   (akash tx bme mint-act)        — if needed
  *   1. Write SDL to temp file
  *   2. Create Deployment  (provider-services tx deployment create)
  *   3. Poll for Bids      (provider-services query market bid list)
@@ -35,14 +42,18 @@ export interface AkashConfig {
     mnemonic: string;
     /** Akash RPC endpoint */
     rpcEndpoint?: string;
-    /** Deposit amount in uakt for deployments (default: 5000000 = 5 AKT) */
+    /** Deposit amount in uact for deployments (default: 5000000 = 5 ACT) */
     depositAmount?: string;
+    /** Amount of AKT (in uakt) to auto-mint into ACT when balance is low (default: 100000000 = 100 AKT) */
+    autoMintAmountUakt?: string;
     /** Bid timeout in ms (default: 120000) */
     bidTimeoutMs?: number;
     /** Lease status poll timeout in ms (default: 120000) */
     leaseTimeoutMs?: number;
     /** Path to provider-services binary (default: "provider-services") */
     cliBinary?: string;
+    /** Path to akash node binary for BME commands (default: "akash") */
+    akashBinary?: string;
     /** Chain ID (default: "testnet-8") */
     chainId?: string;
 }
@@ -53,7 +64,7 @@ interface TierResources {
     cpu: number;      // millicpu (1000 = 1 vCPU)
     memory: string;   // e.g. "1Gi"
     storage: string;  // e.g. "1Gi"
-    pricePerBlock: number; // uakt per block
+    pricePerBlock: number; // uact per block
 }
 
 const TIER_RESOURCES: Record<number, TierResources> = {
@@ -90,7 +101,7 @@ profiles:
     dcloud:
       pricing:
         bot:
-          denom: uakt
+          denom: uact
           amount: ${res.pricePerBlock}
 deployment:
   bot:
@@ -122,9 +133,11 @@ export class AkashBackend implements DeploymentBackend {
             mnemonic: config.mnemonic,
             rpcEndpoint: config.rpcEndpoint || "https://testnetrpc.akashnet.net:443",
             depositAmount: config.depositAmount || "5000000",
+            autoMintAmountUakt: config.autoMintAmountUakt || "100000000",
             bidTimeoutMs: config.bidTimeoutMs || 120_000,
             leaseTimeoutMs: config.leaseTimeoutMs || 120_000,
             cliBinary: config.cliBinary || "provider-services",
+            akashBinary: config.akashBinary || "akash",
             chainId: config.chainId || "testnet-8",
         };
     }
@@ -179,9 +192,8 @@ export class AkashBackend implements DeploymentBackend {
             ...args,
             "--from", this.keyName,
             "--keyring-backend", "test",
-            "--gas-prices", "0.025uakt",
-            "--gas", "auto",
-            "--gas-adjustment", "1.5",
+            "--fees", "25000uakt",
+            "--gas", "800000",
             "--broadcast-mode", "sync",
             "--yes",
         ], { timeout: 60_000 });
@@ -236,14 +248,88 @@ export class AkashBackend implements DeploymentBackend {
 
         console.log(`[Akash] 👛 Wallet: ${this.address}`);
 
-        // Verify balance
+        // Verify balance and auto-mint ACT if needed
         const balance = await this.cli([
             "query", "bank", "balances", this.address,
         ]);
-        console.log(`[Akash] 💰 Balance: ${JSON.stringify(balance.balances || balance)}`);
+        const balances = balance.balances || [];
+        console.log(`[Akash] 💰 Balance: ${JSON.stringify(balances)}`);
+
+        // Check if we have enough ACT for deployments
+        const actBalance = balances.find((b: any) => b.denom === "uact");
+        const aktBalance = balances.find((b: any) => b.denom === "uakt");
+        const actAmount = parseInt(actBalance?.amount || "0", 10);
+        const depositNeeded = parseInt(this.config.depositAmount, 10);
+
+        if (actAmount < depositNeeded) {
+            console.log(`[Akash] 💱 ACT balance (${actAmount} uact) < deposit (${depositNeeded} uact), minting ACT...`);
+            await this.mintAct();
+        }
 
         this.initialized = true;
         console.log("[Akash] ✅ CLI initialized");
+    }
+
+    // ─── BME: ACT Minting ────────────────────────────────────────
+
+    /**
+     * Mint ACT from AKT via BME (Burn-Mint Equilibrium).
+     * Requires `akash` binary v2.1.0+ with `tx bme mint-act` support.
+     * The minting deposits AKT into a vault and mints ~equivalent ACT
+     * after epoch processing (~60s on testnet).
+     */
+    private async mintAct(): Promise<void> {
+        const mintAmount = this.config.autoMintAmountUakt;
+        console.log(`[Akash] 💱 Minting ACT from ${parseInt(mintAmount, 10) / 1_000_000} AKT...`);
+
+        try {
+            const { stdout, stderr } = await execFileAsync(
+                this.config.akashBinary,
+                [
+                    "tx", "bme", "mint-act", `${mintAmount}uakt`,
+                    "--from", this.keyName,
+                    "--keyring-backend", "test",
+                    "--chain-id", this.config.chainId,
+                    "--node", this.config.rpcEndpoint,
+                    "--fees", "25000uakt",
+                    "--gas", "800000",
+                    "--yes",
+                    "--output", "json",
+                ],
+                {
+                    timeout: 30_000,
+                    env: { ...process.env, HOME: os.homedir() },
+                },
+            );
+
+            if (stderr && stderr.trim()) {
+                console.warn(`[Akash] mint stderr: ${stderr.trim()}`);
+            }
+
+            try {
+                const result = JSON.parse(stdout);
+                console.log(`[Akash] 💱 Mint TX: ${result.txhash}`);
+            } catch {
+                console.log(`[Akash] 💱 Mint submitted`);
+            }
+
+            // Wait for epoch processing (BME mints ACT after the next epoch)
+            console.log("[Akash] ⏳ Waiting 65s for BME epoch processing...");
+            await new Promise(r => setTimeout(r, 65_000));
+
+            // Verify new balance
+            const balance = await this.cli([
+                "query", "bank", "balances", this.address,
+            ]);
+            const balances = balance.balances || [];
+            const actBalance = balances.find((b: any) => b.denom === "uact");
+            console.log(`[Akash] 💰 ACT balance after mint: ${actBalance?.amount || 0} uact`);
+
+        } catch (error: any) {
+            console.error(`[Akash] ⚠️ ACT minting failed: ${error.message}`);
+            console.error(`[Akash] Make sure 'akash' v2.1.0+ binary is installed (current: ${this.config.akashBinary})`);
+            throw new Error(`ACT minting failed. Install akash v2.1.0+ or manually mint ACT: akash tx bme mint-act <amount>uakt --from <wallet>`);
+        }
     }
 
     // ─── DeploymentBackend Interface ─────────────────────────────
@@ -269,7 +355,7 @@ export class AkashBackend implements DeploymentBackend {
                 console.log("[Akash] 📋 Creating deployment...");
                 const deployResult = await this.tx([
                     "tx", "deployment", "create", sdlFile,
-                    "--deposit", `${this.config.depositAmount}uakt`,
+                    "--deposit", `${this.config.depositAmount}uact`,
                 ]);
 
                 const dseq = await this.extractDseq(deployResult);
