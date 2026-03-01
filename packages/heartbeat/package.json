@@ -1,0 +1,22 @@
+{
+    "name": "@aporia/heartbeat",
+    "version": "1.0.0",
+    "description": "APORIA Heartbeat Watchdog Service",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "dev": "ts-node src/index.ts",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "ethers": "^6.9.0",
+        "p-limit": "^3.1.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.3.0",
+        "ts-node": "^10.9.0",
+        "vitest": "^1.2.0",
+        "@types/node": "^20.0.0"
+    }
+}

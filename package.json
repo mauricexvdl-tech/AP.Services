@@ -1,0 +1,20 @@
+{
+  "name": "aporia-protocol",
+  "version": "1.0.0",
+  "description": "APORIA: Das Dezentrale Resurrection-Protokoll",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces",
+    "test:contracts": "npm run test -w packages/contracts",
+    "test:heartbeat": "npm run test -w packages/heartbeat",
+    "test:secrets": "npm run test -w packages/secrets",
+    "test:deployer": "npm run test -w packages/deployer",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

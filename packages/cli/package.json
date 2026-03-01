@@ -1,0 +1,30 @@
+{
+    "name": "@aporia/cli",
+    "version": "1.0.0",
+    "description": "APORIA CLI – Interact with the Resurrection Protocol",
+    "main": "dist/index.js",
+    "bin": {
+        "aporia": "./dist/index.js"
+    },
+    "scripts": {
+        "build": "tsc",
+        "start": "ts-node src/index.ts",
+        "dev": "ts-node src/index.ts",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "commander": "^12.0.0",
+        "chalk": "^4.1.2",
+        "inquirer": "^8.2.6",
+        "ethers": "^6.9.0",
+        "ora": "^5.4.1",
+        "@aporia/secrets": "*"
+    },
+    "devDependencies": {
+        "typescript": "^5.3.0",
+        "ts-node": "^10.9.0",
+        "vitest": "^1.2.0",
+        "@types/node": "^20.0.0",
+        "@types/inquirer": "^9.0.0"
+    }
+}

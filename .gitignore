@@ -1,0 +1,29 @@
+node_modules/
+dist/
+cache/
+artifacts/
+typechain-types/
+coverage/
+.env
+.env.local
+*.log
+
+# Temporary test files
+test-akash-deploy.js
+test-protobuf.js
+test-sdl-groups.js
+deploy-test.log
+
+# Agent IDE configs
+.agent/
+.agents/
+.claude/
+skills-lock.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

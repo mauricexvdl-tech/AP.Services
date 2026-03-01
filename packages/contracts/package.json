@@ -1,0 +1,21 @@
+{
+    "name": "@aporia/contracts",
+    "version": "1.0.0",
+    "description": "APORIA Registry Smart Contract (Base L2)",
+    "scripts": {
+        "compile": "hardhat compile",
+        "test": "hardhat test",
+        "clean": "hardhat clean",
+        "deploy:sepolia": "hardhat run scripts/deploy.ts --network baseSepolia",
+        "deploy:base": "hardhat run scripts/deploy.ts --network base",
+        "verify": "hardhat verify --network baseSepolia"
+    },
+    "dependencies": {
+        "dotenv": "^16.3.0"
+    },
+    "devDependencies": {
+        "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+        "hardhat": "^2.19.0",
+        "@openzeppelin/contracts": "^5.0.0"
+    }
+}

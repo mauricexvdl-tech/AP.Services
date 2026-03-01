@@ -1,0 +1,23 @@
+{
+    "name": "@aporia/gateway",
+    "version": "1.0.0",
+    "description": "APORIA Alchemy Gateway – x402 payment-enabled RPC access",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "dev": "ts-node src/index.ts",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "@alchemy/x402": "^0.2.0",
+        "@x402/fetch": "^2.0.0",
+        "ethers": "^6.9.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.3.0",
+        "ts-node": "^10.9.0",
+        "vitest": "^1.2.0",
+        "@types/node": "^20.0.0"
+    }
+}

@@ -1,0 +1,30 @@
+{
+    "name": "@aporia/orchestrator",
+    "version": "1.0.0",
+    "description": "APORIA ResurrectionOrchestrator – E2E autonomous bot resurrection pipeline",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "start": "ts-node src/service.ts",
+        "dev": "ts-node src/service.ts",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "@akashnetwork/akash-api": "^1.4.1",
+        "@akashnetwork/akashjs": "^1.0.0",
+        "@aporia/deployer": "*",
+        "@aporia/gateway": "*",
+        "@aporia/heartbeat": "*",
+        "@aporia/secrets": "*",
+        "@cosmjs/proto-signing": "^0.32.4",
+        "@cosmjs/stargate": "^0.32.4",
+        "ethers": "^6.9.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "ts-node": "^10.9.0",
+        "typescript": "^5.3.0",
+        "vitest": "^1.2.0"
+    }
+}
