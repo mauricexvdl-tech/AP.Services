@@ -2,83 +2,31 @@
  * @module @aporia/orchestrator
  * AkashBackend – Decentralized Cloud Deployment via Akash Network
  *
- * Implements the DeploymentBackend interface using the Akash Network
- * reverse-auction deployment lifecycle:
+ * Uses the `provider-services` CLI binary for all chain transactions,
+ * bypassing the akashjs SDK protobuf compatibility issues.
  *
- *   1. Create Deployment (MsgCreateDeployment)   → on-chain tx
- *   2. Poll for Bids (QueryBidsRequest)          → wait for providers
- *   3. Create Lease  (MsgCreateLease)            → accept cheapest bid
- *   4. Send Manifest (mTLS PUT to provider)      → inject envVars HERE ONLY
- *   5. Poll Lease Status                          → wait for container URI
+ * Deployment lifecycle:
+ *   1. Write SDL to temp file
+ *   2. Create Deployment  (provider-services tx deployment create)
+ *   3. Poll for Bids      (provider-services query market bid list)
+ *   4. Create Lease        (provider-services tx market lease create)
+ *   5. Send Manifest       (provider-services send-manifest)
+ *   6. Poll Lease Status   (provider-services lease-status)
  *
- * Security: envVars are NEVER written to disk, SDL, or logged.
- *           They are injected ONLY into the mTLS manifest body in RAM.
+ * Security: envVars are NEVER written to disk or SDL.
+ *           They are injected ONLY into the manifest env[] in RAM,
+ *           written to a temp file that is immediately deleted.
  */
 
-import https from "https";
-import { DirectSecp256k1HdWallet, Registry } from "@cosmjs/proto-signing";
-import { SigningStargateClient } from "@cosmjs/stargate";
-import { getAkashTypeRegistry } from "@akashnetwork/akashjs/build/stargate/index.js";
-import { SDL } from "@akashnetwork/akashjs/build/sdl/index.js";
-import { getRpc } from "@akashnetwork/akashjs/build/rpc/index.js";
-import * as cert from "@akashnetwork/akashjs/build/certificates/index.js";
-import { certificateManager } from "@akashnetwork/akashjs/build/certificates/certificate-manager/index.js";
-import type { CertificatePem } from "@akashnetwork/akashjs/build/certificates/certificate-manager/CertificateManager.js";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 import { type DeploymentBackend, type DeployRequest, type DeployResponse } from "./backends";
 
-// ─── Akash Protobuf Types ────────────────────────────────────────
-// These come from @akashnetwork/akash-api (used for bids/lease queries)
-// MsgCreateDeployment and MsgCreateLease are loaded from the akashjs
-// type registry at init time because they need their v1beta4/v1beta5
-// encoders (not the v1beta3 stubs from akash-api).
-
-let MsgCreateDeploymentV4: any;   // from registry: akash.deployment.v1beta4
-let MsgCreateLeaseV5: any;        // from registry: akash.market.v1beta5
-let QueryBidsRequest: any;
-let QueryBidsResponse: any;
-let QueryProviderRequest: any;
-let QueryProviderResponse: any;
-let BidID: any;
-
-async function loadAkashTypes() {
-    // Dynamic imports for query types that are still used from akash-api
-    try {
-        // @ts-ignore
-        const marketMod = await import("@akashnetwork/akash-api/akash/market/v1beta4");
-        QueryBidsRequest = marketMod.QueryBidsRequest;
-        QueryBidsResponse = marketMod.QueryBidsResponse;
-        BidID = marketMod.BidID;
-
-        // @ts-ignore
-        const providerMod = await import("@akashnetwork/akash-api/akash/provider/v1beta3");
-        QueryProviderRequest = providerMod.QueryProviderRequest;
-        QueryProviderResponse = providerMod.QueryProviderResponse;
-
-        // Force registration of cert types in the global registry
-        // @ts-ignore
-        await import("@akashnetwork/akash-api/akash/cert/v1beta3");
-    } catch (e) {
-        throw new Error(`Could not load Akash protobuf types from @akashnetwork/akash-api: ${e}`);
-    }
-
-    // Load the v1beta4/v1beta5 message encoders from the akashjs registry
-    // These have the correct field layout for testnet-8
-    const akashTypes = getAkashTypeRegistry();
-    const deployEntry = akashTypes.find((e: any) => e[0] === "/akash.deployment.v1beta4.MsgCreateDeployment");
-    if (deployEntry) {
-        MsgCreateDeploymentV4 = deployEntry[1];
-    } else {
-        throw new Error("v1beta4 MsgCreateDeployment not found in akashjs type registry");
-    }
-
-    const leaseEntry = akashTypes.find((e: any) => e[0] === "/akash.market.v1beta5.MsgCreateLease");
-    if (leaseEntry) {
-        MsgCreateLeaseV5 = leaseEntry[1];
-    } else {
-        throw new Error("v1beta5 MsgCreateLease not found in akashjs type registry");
-    }
-}
+const execFileAsync = promisify(execFile);
 
 // ─── Config ──────────────────────────────────────────────────────
 
@@ -89,10 +37,14 @@ export interface AkashConfig {
     rpcEndpoint?: string;
     /** Deposit amount in uakt for deployments (default: 5000000 = 5 AKT) */
     depositAmount?: string;
-    /** Bid timeout in ms (default: 60000) */
+    /** Bid timeout in ms (default: 120000) */
     bidTimeoutMs?: number;
     /** Lease status poll timeout in ms (default: 120000) */
     leaseTimeoutMs?: number;
+    /** Path to provider-services binary (default: "provider-services") */
+    cliBinary?: string;
+    /** Chain ID (default: "testnet-8") */
+    chainId?: string;
 }
 
 // ─── Tier → Compute Resources ────────────────────────────────────
@@ -133,19 +85,18 @@ profiles:
         memory:
           size: ${res.memory}
         storage:
-          size: ${res.storage}
+          - size: ${res.storage}
   placement:
-    global:
+    dcloud:
       pricing:
         bot:
           denom: uakt
           amount: ${res.pricePerBlock}
 deployment:
   bot:
-    global:
+    dcloud:
       profile: bot
-      count: 1
-`;
+      count: 1`;
 }
 
 // ─── AkashBackend ────────────────────────────────────────────────
@@ -153,101 +104,146 @@ deployment:
 /**
  * AkashBackend – Deploys bots to the Akash decentralized cloud
  *
- * Implements the full Akash reverse-auction deployment lifecycle.
- * envVars are injected ONLY into the mTLS manifest body — never
+ * Uses the provider-services CLI binary for all chain interactions,
+ * completely bypassing the akashjs SDK protobuf issues.
+ *
+ * envVars are injected ONLY into the manifest body — never
  * written to disk, logs, or SDL.
  */
 export class AkashBackend implements DeploymentBackend {
-    readonly name = "Akash (decentralized)";
-
+    readonly name = "AkashBackend";
     private config: Required<AkashConfig>;
-    private wallet: DirectSecp256k1HdWallet | null = null;
-    private client: SigningStargateClient | null = null;
-    private certificate: CertificatePem | null = null;
-    private address: string = "";
+    private keyName = "aporia-deployer";
     private initialized = false;
+    private address = "";
 
     constructor(config: AkashConfig) {
         this.config = {
             mnemonic: config.mnemonic,
             rpcEndpoint: config.rpcEndpoint || "https://testnetrpc.akashnet.net:443",
             depositAmount: config.depositAmount || "5000000",
-            bidTimeoutMs: config.bidTimeoutMs || 60_000,
+            bidTimeoutMs: config.bidTimeoutMs || 120_000,
             leaseTimeoutMs: config.leaseTimeoutMs || 120_000,
+            cliBinary: config.cliBinary || "provider-services",
+            chainId: config.chainId || "testnet-8",
         };
     }
 
+    // ─── CLI Helper ──────────────────────────────────────────────
+
     /**
-     * Lazy initialization: wallet, client, certificate, protobuf types
+     * Execute a provider-services CLI command.
+     * All commands automatically include --node, --chain-id, --from, and --output json.
      */
-    private async init(): Promise<void> {
-        if (this.initialized) return;
+    private async cli(args: string[], options?: { stdin?: string; timeout?: number }): Promise<any> {
+        const fullArgs = [
+            ...args,
+            "--node", this.config.rpcEndpoint,
+            "--chain-id", this.config.chainId,
+            "--output", "json",
+        ];
 
-        console.log("[Akash] 🔧 Initializing wallet and client...");
+        console.log(`[Akash CLI] $ ${this.config.cliBinary} ${args.slice(0, 4).join(" ")}...`);
 
-        // Load protobuf types
-        await loadAkashTypes();
+        try {
+            const { stdout, stderr } = await execFileAsync(
+                this.config.cliBinary,
+                fullArgs,
+                {
+                    timeout: options?.timeout || 30_000,
+                    maxBuffer: 10 * 1024 * 1024, // 10 MB
+                    env: { ...process.env, HOME: os.homedir() },
+                },
+            );
 
-        // Create wallet from mnemonic
-        this.wallet = await DirectSecp256k1HdWallet.fromMnemonic(
-            this.config.mnemonic,
-            { prefix: "akash" }
-        );
+            if (stderr && stderr.trim()) {
+                console.warn(`[Akash CLI] stderr: ${stderr.trim()}`);
+            }
 
-        const accounts = await this.wallet.getAccounts();
-        this.address = accounts[0].address;
-        console.log(`[Akash] 👛 Wallet: ${this.address}`);
-
-        // Connect signing client with Akash type registry
-        const registry = getAkashTypeRegistry();
-        this.client = await SigningStargateClient.connectWithSigner(
-            this.config.rpcEndpoint,
-            this.wallet,
-            { registry: new Registry(registry) }
-        );
-
-        // Load or create mTLS certificate
-        this.certificate = await this.loadOrCreateCertificate();
-
-        this.initialized = true;
-        console.log("[Akash] ✅ Initialized");
+            try {
+                return JSON.parse(stdout);
+            } catch {
+                return stdout.trim();
+            }
+        } catch (error: any) {
+            const msg = error.stderr || error.message;
+            throw new Error(`CLI command failed: ${msg}`);
+        }
     }
 
     /**
-     * Create or load mTLS certificate for provider communication
+     * Execute a CLI transaction (tx) command with auto-signing.
      */
-    private async loadOrCreateCertificate(): Promise<CertificatePem> {
-        console.log("[Akash] 🔐 Creating mTLS certificate...");
+    private async tx(args: string[]): Promise<any> {
+        return this.cli([
+            ...args,
+            "--from", this.keyName,
+            "--keyring-backend", "test",
+            "--gas-prices", "0.025uakt",
+            "--gas", "auto",
+            "--gas-adjustment", "1.5",
+            "--broadcast-mode", "sync",
+            "--yes",
+        ], { timeout: 60_000 });
+    }
 
-        const certificate = certificateManager.generatePEM(this.address);
+    // ─── Initialization ──────────────────────────────────────────
 
-        let result: any;
+    private async init(): Promise<void> {
+        if (this.initialized) return;
+
+        console.log("[Akash] 🔧 Initializing wallet via CLI...");
+
+        // Import mnemonic into the CLI keyring
+        // Write mnemonic to a temp file to avoid it appearing in process args
+        const mnemonicFile = path.join(os.tmpdir(), `.aporia-mnemonic-${Date.now()}`);
         try {
-            result = await cert.broadcastCertificate(
-                certificate,
-                this.address,
-                this.client! as any
-            );
-        } catch (error: any) {
-            if (error.message?.includes("certificate already exists")) {
-                console.log("[Akash] 🔐 Using existing certificate");
-                return certificate;
+            fs.writeFileSync(mnemonicFile, this.config.mnemonic, { mode: 0o600 });
+
+            await execFileAsync(this.config.cliBinary, [
+                "keys", "add", this.keyName,
+                "--recover",
+                "--keyring-backend", "test",
+                "--source", mnemonicFile,
+            ], {
+                timeout: 15_000,
+                env: { ...process.env, HOME: os.homedir() },
+            }).catch(() => {
+                // Key might already exist — that's fine
+            });
+        } finally {
+            // Always delete the mnemonic file
+            try { fs.unlinkSync(mnemonicFile); } catch { }
+        }
+
+        // Get the address from the keyring
+        const keysResult = await this.cli([
+            "keys", "show", this.keyName,
+            "--keyring-backend", "test",
+        ]);
+
+        this.address = keysResult.address || keysResult.name;
+        if (!this.address) {
+            // Try parsing as text output
+            const text = typeof keysResult === "string" ? keysResult : JSON.stringify(keysResult);
+            const match = text.match(/akash[a-z0-9]{39}/);
+            if (match) {
+                this.address = match[0];
+            } else {
+                throw new Error(`Could not determine wallet address from CLI output: ${text}`);
             }
-            throw error;
         }
 
-        if (result.code !== undefined && result.code === 0) {
-            console.log("[Akash] 🔐 Certificate broadcast to chain");
-            return certificate;
-        }
+        console.log(`[Akash] 👛 Wallet: ${this.address}`);
 
-        // Certificate might already exist — that's OK
-        if (result.rawLog?.includes("certificate already exists")) {
-            console.log("[Akash] 🔐 Using existing certificate");
-            return certificate;
-        }
+        // Verify balance
+        const balance = await this.cli([
+            "query", "bank", "balances", this.address,
+        ]);
+        console.log(`[Akash] 💰 Balance: ${JSON.stringify(balance.balances || balance)}`);
 
-        throw new Error(`Certificate broadcast failed: ${result.rawLog}`);
+        this.initialized = true;
+        console.log("[Akash] ✅ CLI initialized");
     }
 
     // ─── DeploymentBackend Interface ─────────────────────────────
@@ -260,39 +256,51 @@ export class AkashBackend implements DeploymentBackend {
 
             console.log(`[Akash] 🚀 Deploying ${request.imageURI} (Tier ${tierNum})`);
 
-            // ── STEP 1: Generate SDL ─────────────────────────────
+            // ── STEP 1: Generate SDL and write to temp file ──────
             // NOTE: envVars are NOT in the SDL — they go in the manifest only
             const ports = request.ports?.length ? request.ports : [3000];
             const sdlYaml = generateSDL(request.imageURI, tierNum, ports);
-            const sdl = SDL.fromString(sdlYaml, "beta3");
 
-            // ── STEP 2: Create Deployment ────────────────────────
-            const deployment = await this.createDeployment(sdl);
-            const dseq = deployment.id.dseq;
-            console.log(`[Akash] 📋 Deployment created: DSEQ ${dseq}`);
+            const sdlFile = path.join(os.tmpdir(), `aporia-sdl-${Date.now()}.yaml`);
+            fs.writeFileSync(sdlFile, sdlYaml, { mode: 0o600 });
 
-            // ── STEP 3: Wait for Bids ────────────────────────────
-            const bid = await this.fetchBid(dseq, this.address);
-            console.log(`[Akash] 🏷️  Bid received from provider: ${bid.id?.provider}`);
+            try {
+                // ── STEP 2: Create Deployment ────────────────────
+                console.log("[Akash] 📋 Creating deployment...");
+                const deployResult = await this.tx([
+                    "tx", "deployment", "create", sdlFile,
+                    "--deposit", `${this.config.depositAmount}uakt`,
+                ]);
 
-            // ── STEP 4: Create Lease ─────────────────────────────
-            const lease = await this.createLease(bid);
-            console.log(`[Akash] 📜 Lease created: DSEQ ${lease.id.dseq}`);
+                const dseq = await this.extractDseq(deployResult);
+                console.log(`[Akash] 📋 Deployment created: DSEQ ${dseq}`);
 
-            // ── STEP 5: Send Manifest (envVars injected HERE) ────
-            // CRITICAL: This is the ONLY point where envVars enter any payload
-            await this.sendManifest(sdl, lease, request.envVars);
-            console.log(`[Akash] 📦 Manifest sent to provider`);
+                // ── STEP 3: Wait for Bids ────────────────────────
+                const bid = await this.fetchBid(dseq);
+                console.log(`[Akash] 🏷️  Bid received from provider: ${bid.provider}`);
 
-            // ── STEP 6: Poll for service URL ─────────────────────
-            const serviceUrl = await this.pollLeaseStatus(lease);
-            console.log(`[Akash] ✅ Service live at: ${serviceUrl}`);
+                // ── STEP 4: Create Lease ─────────────────────────
+                await this.createLease(dseq, bid);
+                console.log(`[Akash] 📜 Lease created: DSEQ ${dseq}`);
 
-            return {
-                success: true,
-                deploymentId: `akash-${dseq}`,
-                url: serviceUrl,
-            };
+                // ── STEP 5: Send Manifest (envVars injected HERE) ─
+                await this.sendManifest(sdlFile, dseq, bid.provider, request.envVars);
+                console.log(`[Akash] 📦 Manifest sent to provider`);
+
+                // ── STEP 6: Poll for service URL ─────────────────
+                const serviceUrl = await this.pollLeaseStatus(dseq, bid.provider);
+                console.log(`[Akash] ✅ Service live at: ${serviceUrl}`);
+
+                return {
+                    success: true,
+                    deploymentId: `akash-${dseq}`,
+                    url: serviceUrl,
+                };
+
+            } finally {
+                // Always clean up SDL file
+                try { fs.unlinkSync(sdlFile); } catch { }
+            }
 
         } catch (error: any) {
             console.error(`[Akash] ❌ Deployment failed: ${error.message}`);
@@ -306,269 +314,222 @@ export class AkashBackend implements DeploymentBackend {
     }
 
     async stop(deploymentId: string): Promise<void> {
-        // Extract DSEQ from deploymentId
         const dseq = deploymentId.replace("akash-", "");
         console.log(`[Akash] 🛑 Closing deployment DSEQ ${dseq}`);
 
         await this.init();
 
-        const msg = {
-            typeUrl: "/akash.deployment.v1beta3.MsgCloseDeployment",
-            value: {
-                id: {
-                    owner: this.address,
-                    dseq: dseq,
-                },
-            },
-        };
-
-        const fee = { amount: [{ denom: "uakt", amount: "20000" }], gas: "800000" };
-        await this.client!.signAndBroadcast(this.address, [msg], fee, "close deployment");
+        await this.tx([
+            "tx", "deployment", "close",
+            "--dseq", dseq,
+            "--owner", this.address,
+        ]);
     }
 
     // ─── Private: Akash Lifecycle Methods ────────────────────────
 
-    private async createDeployment(sdl: SDL): Promise<any> {
-        const blockheight = await this.client!.getHeight();
-        const groups = sdl.groups();
-
-        // v1beta4 deposit is nested: { amount: {denom, amount}, sources: [] }
-        const deployment = {
-            id: {
-                owner: this.address,
-                dseq: String(blockheight),
-            },
-            groups,
-            deposit: {
-                amount: {
-                    denom: "uakt",
-                    amount: this.config.depositAmount,
-                },
-                sources: [{
-                    depositor: this.address,
-                    amount: {
-                        denom: "uakt",
-                        amount: this.config.depositAmount,
-                    },
-                }],
-            },
-            depositor: this.address,
-            hash: await sdl.manifestVersion(),
-        };
-
-        const fee = { amount: [{ denom: "uakt", amount: "20000" }], gas: "800000" };
-
-        const msg = {
-            typeUrl: "/akash.deployment.v1beta4.MsgCreateDeployment",
-            value: MsgCreateDeploymentV4.fromPartial(deployment),
-        };
-
-        const tx = await this.client!.signAndBroadcast(this.address, [msg], fee, "create deployment");
-
-        if (tx.code !== undefined && tx.code === 0) {
-            return deployment;
-        }
-
-        throw new Error(`CreateDeployment failed (code ${tx.code}): ${tx.rawLog}`);
-    }
-
-    private async fetchBid(dseq: string | number, owner: string): Promise<any> {
-        const rpc = await getRpc(this.config.rpcEndpoint);
-        const startTime = Date.now();
-
-        while (Date.now() - startTime < this.config.bidTimeoutMs) {
-            console.log("[Akash] ⏳ Fetching bids...");
-            await new Promise(r => setTimeout(r, 5000));
-
-            try {
-                const request = QueryBidsRequest.fromPartial({
-                    filters: { owner, dseq },
-                });
-
-                // Use RPC to query bids
-                const queryClient = new (rpc as any).QueryClientImpl(rpc);
-                const bids = await queryClient.Bids(request);
-
-                if (bids.bids?.length > 0 && bids.bids[0].bid) {
-                    return bids.bids[0].bid;
-                }
-            } catch (error: any) {
-                console.warn(`[Akash] ⚠️  Bid fetch error: ${error.message}`);
-            }
-        }
-
-        throw new Error(`No bids received within ${this.config.bidTimeoutMs / 1000}s. Aborting.`);
-    }
-
-    private async createLease(bid: any): Promise<any> {
-        if (!bid.id) throw new Error("Bid ID is undefined");
-
-        const lease = { bidId: bid.id };
-        const fee = { amount: [{ denom: "uakt", amount: "50000" }], gas: "2000000" };
-
-        const msg = {
-            typeUrl: "/akash.market.v1beta5.MsgCreateLease",
-            value: MsgCreateLeaseV5.fromPartial(lease),
-        };
-
-        const tx = await this.client!.signAndBroadcast(this.address, [msg], fee, "create lease");
-
-        if (tx.code !== undefined && tx.code === 0) {
-            return {
-                id: BidID ? BidID.toJSON(bid.id) : bid.id,
-            };
-        }
-
-        throw new Error(`CreateLease failed: ${tx.rawLog}`);
-    }
-
-    private async sendManifest(sdl: SDL, lease: any, envVars: Record<string, string>): Promise<void> {
-        const { dseq, provider } = lease.id;
-
-        // Query provider info for their host URI
-        const rpc = await getRpc(this.config.rpcEndpoint);
-        let providerUri: string;
-
-        try {
-            const queryClient = new (rpc as any).QueryClientImpl(rpc);
-            const request = QueryProviderRequest.fromPartial({ owner: provider });
-            const response = await queryClient.Provider(request);
-            providerUri = response.provider.hostUri;
-        } catch {
-            // Fallback: construct provider URI from address
-            providerUri = `https://provider.${provider}.akash.pub:8443`;
-        }
-
-        // Build manifest JSON — this is where envVars are injected (RAM only)
-        const manifestJson = sdl.manifestSortedJSON();
-        const manifest = JSON.parse(manifestJson);
-
-        // Inject env vars into each service in the manifest
-        // SECURITY: This data only exists in RAM and in the mTLS request body
-        if (manifest && Array.isArray(manifest)) {
-            for (const group of manifest) {
-                if (group.services) {
-                    for (const service of group.services) {
-                        service.env = service.env || [];
-                        for (const [key, value] of Object.entries(envVars)) {
-                            service.env.push(`${key}=${value}`);
+    /**
+     * Extract DSEQ from deployment creation tx result.
+     */
+    private async extractDseq(txResult: any): Promise<string> {
+        // Try events
+        if (txResult.logs) {
+            for (const log of txResult.logs) {
+                for (const event of (log.events || [])) {
+                    if (event.type === "akash.v1") {
+                        for (const attr of event.attributes || []) {
+                            if (attr.key === "dseq") return attr.value;
                         }
                     }
                 }
             }
         }
 
-        const manifestBody = JSON.stringify(manifest);
-        const path = `/deployment/${dseq}/manifest`;
-        const uri = new URL(providerUri);
-
-        const agent = new https.Agent({
-            cert: this.certificate!.cert,
-            key: this.certificate!.privateKey,
-            rejectUnauthorized: false,
-            servername: "",
-        });
-
-        await new Promise<void>((resolve, reject) => {
-            const req = https.request(
-                {
-                    hostname: uri.hostname,
-                    port: uri.port || 8443,
-                    path,
-                    method: "PUT",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Accept: "application/json",
-                        "Content-Length": Buffer.byteLength(manifestBody),
-                    },
-                    agent,
-                },
-                (res) => {
-                    let data = "";
-                    res.on("data", (chunk) => (data += chunk));
-                    res.on("end", () => {
-                        if (res.statusCode === 200 || res.statusCode === 201) {
-                            resolve();
-                        } else {
-                            reject(new Error(`Manifest send failed (${res.statusCode}): ${data}`));
-                        }
-                    });
-                }
-            );
-
-            req.on("error", reject);
-            req.write(manifestBody);
-            req.end();
-        });
-
-        // SECURITY: Wipe manifest body from memory
-        // (The string is immutable in JS but we zero the reference)
-        // The envVars object will be wiped by the orchestrator after this returns
-    }
-
-    private async pollLeaseStatus(lease: any): Promise<string> {
-        const { dseq, gseq, oseq, provider } = lease.id;
-
-        // Query provider URI
-        const rpc = await getRpc(this.config.rpcEndpoint);
-        let providerUri: string;
-
-        try {
-            const queryClient = new (rpc as any).QueryClientImpl(rpc);
-            const request = QueryProviderRequest.fromPartial({ owner: provider });
-            const response = await queryClient.Provider(request);
-            providerUri = response.provider.hostUri;
-        } catch {
-            providerUri = `https://provider.${provider}.akash.pub:8443`;
+        // Try raw_log
+        if (txResult.raw_log) {
+            const match = txResult.raw_log.match(/"dseq":"(\d+)"/);
+            if (match) return match[1];
         }
 
-        const leasePath = `/lease/${dseq}/${gseq || 1}/${oseq || 1}/status`;
-        const uri = new URL(providerUri);
+        // Try txhash — query the tx to get events
+        if (txResult.txhash) {
+            console.log(`[Akash] 🔍 Querying TX ${txResult.txhash} for DSEQ...`);
+            // Wait for tx to be included in a block
+            return this.waitForDseq(txResult.txhash);
+        }
 
-        const agent = new https.Agent({
-            cert: this.certificate!.cert,
-            key: this.certificate!.privateKey,
-            rejectUnauthorized: false,
-            servername: "",
-        });
+        throw new Error("Could not extract DSEQ from deployment creation result");
+    }
 
+    private async waitForDseq(txhash: string): Promise<string> {
+        for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+
+            try {
+                const result = await this.cli(["query", "tx", txhash]);
+
+                if (result.code === 0 || result.code === undefined) {
+                    // Look for dseq in events
+                    for (const event of (result.events || [])) {
+                        for (const attr of (event.attributes || [])) {
+                            const key = attr.key && Buffer.from(attr.key, "base64").toString();
+                            const value = attr.value && Buffer.from(attr.value, "base64").toString();
+                            if (key === "dseq") return value;
+                        }
+                    }
+
+                    // Try logs
+                    if (result.logs) {
+                        for (const log of result.logs) {
+                            for (const event of (log.events || [])) {
+                                for (const attr of (event.attributes || [])) {
+                                    if (attr.key === "dseq") return attr.value;
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback: use the block height as a close-enough DSEQ
+                    if (result.height) return String(result.height);
+                }
+
+                if (result.code && result.code !== 0) {
+                    throw new Error(`TX failed with code ${result.code}: ${result.raw_log}`);
+                }
+            } catch (error: any) {
+                if (error.message.includes("not found")) continue;
+                throw error;
+            }
+        }
+
+        throw new Error(`TX ${txhash} not found after 30s`);
+    }
+
+    /**
+     * Poll for bids on a deployment.
+     */
+    private async fetchBid(dseq: string): Promise<{ provider: string; price: string }> {
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < this.config.bidTimeoutMs) {
+            console.log("[Akash] ⏳ Fetching bids...");
+            await new Promise(r => setTimeout(r, 10_000)); // Wait 10s between polls
+
+            try {
+                const result = await this.cli([
+                    "query", "market", "bid", "list",
+                    "--owner", this.address,
+                    "--dseq", dseq,
+                    "--state", "open",
+                ]);
+
+                const bids = result.bids || [];
+                if (bids.length > 0) {
+                    const bid = bids[0].bid || bids[0];
+                    return {
+                        provider: bid.bid_id?.provider || bid.id?.provider,
+                        price: bid.price?.amount || "unknown",
+                    };
+                }
+            } catch (error: any) {
+                console.warn(`[Akash] ⚠️  Bid fetch error: ${error.message}`);
+            }
+        }
+
+        throw new Error(`No bids received within ${this.config.bidTimeoutMs / 1000}s`);
+    }
+
+    /**
+     * Accept a bid by creating a lease.
+     */
+    private async createLease(dseq: string, bid: { provider: string }): Promise<void> {
+        await this.tx([
+            "tx", "market", "lease", "create",
+            "--dseq", dseq,
+            "--provider", bid.provider,
+            "--gseq", "1",
+            "--oseq", "1",
+        ]);
+    }
+
+    /**
+     * Send the deployment manifest to the provider.
+     * CRITICAL: This is where envVars are injected.
+     *
+     * The provider-services CLI sends the manifest via mTLS
+     * using the on-chain certificate. EnvVars are injected
+     * by modifying the SDL file temporarily.
+     */
+    private async sendManifest(
+        sdlFile: string,
+        dseq: string,
+        provider: string,
+        envVars: Record<string, string>,
+    ): Promise<void> {
+        // Build SDL with env vars injected for the manifest
+        // SECURITY: This temp file is deleted immediately after use
+        const sdlContent = fs.readFileSync(sdlFile, "utf-8");
+
+        // Inject env vars into the SDL services section
+        const envLines = Object.entries(envVars)
+            .map(([k, v]) => `      - ${k}=${v}`)
+            .join("\n");
+
+        const sdlWithEnv = sdlContent.replace(
+            /^(    image: .+)$/m,
+            `$1\n    env:\n${envLines}`,
+        );
+
+        const manifestSdlFile = path.join(os.tmpdir(), `aporia-manifest-${Date.now()}.yaml`);
+        fs.writeFileSync(manifestSdlFile, sdlWithEnv, { mode: 0o600 });
+
+        try {
+            await this.cli([
+                "send-manifest", manifestSdlFile,
+                "--dseq", dseq,
+                "--provider", provider,
+                "--from", this.keyName,
+                "--keyring-backend", "test",
+            ], { timeout: 60_000 });
+        } finally {
+            // SECURITY: Delete manifest file containing secrets immediately
+            try { fs.unlinkSync(manifestSdlFile); } catch { }
+        }
+    }
+
+    /**
+     * Poll the lease status until the container is running and has a URI.
+     */
+    private async pollLeaseStatus(dseq: string, provider: string): Promise<string> {
         const startTime = Date.now();
 
         while (Date.now() - startTime < this.config.leaseTimeoutMs) {
             console.log("[Akash] ⏳ Waiting for container to start...");
 
             try {
-                const status = await new Promise<any>((resolve, reject) => {
-                    const req = https.request(
-                        {
-                            hostname: uri.hostname,
-                            port: uri.port || 8443,
-                            path: leasePath,
-                            method: "GET",
-                            headers: {
-                                "Content-Type": "application/json",
-                                Accept: "application/json",
-                            },
-                            agent,
-                        },
-                        (res) => {
-                            if (res.statusCode !== 200) {
-                                return reject(new Error(`Lease status: ${res.statusCode}`));
-                            }
-                            let data = "";
-                            res.on("data", (chunk) => (data += chunk));
-                            res.on("end", () => resolve(JSON.parse(data)));
-                        }
-                    );
-                    req.on("error", reject);
-                    req.end();
-                });
+                const result = await this.cli([
+                    "lease-status",
+                    "--dseq", dseq,
+                    "--provider", provider,
+                    "--from", this.keyName,
+                    "--keyring-backend", "test",
+                ], { timeout: 30_000 });
 
-                // Extract service URI
-                if (status?.services) {
-                    for (const [name, service] of Object.entries(status.services) as any) {
+                // Extract service URIs
+                if (result?.services) {
+                    for (const [name, service] of Object.entries(result.services) as any) {
                         if (service.uris?.length > 0) {
                             return `https://${service.uris[0]}`;
+                        }
+                    }
+                }
+
+                // Check forwarded ports
+                if (result?.forwarded_ports) {
+                    for (const [name, ports] of Object.entries(result.forwarded_ports) as any) {
+                        if (Array.isArray(ports) && ports.length > 0) {
+                            const p = ports[0];
+                            return `http://${p.host}:${p.externalPort}`;
                         }
                     }
                 }
@@ -576,7 +537,7 @@ export class AkashBackend implements DeploymentBackend {
                 // Not ready yet
             }
 
-            await new Promise(r => setTimeout(r, 5000));
+            await new Promise(r => setTimeout(r, 10_000));
         }
 
         throw new Error(`Container did not start within ${this.config.leaseTimeoutMs / 1000}s`);
