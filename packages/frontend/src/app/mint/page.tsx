@@ -11,7 +11,12 @@ import { motion } from "framer-motion";
 
 export default function MintAgentPage() {
     const { isConnected } = useAccount();
+    const [isMounted, setIsMounted] = useState(false);
     const [step, setStep] = useState(1);
+
+    useEffect(() => {
+        setIsMounted(true);
+    }, []);
     const [isMinting, setIsMinting] = useState(false);
 
     // Form State
@@ -32,6 +37,8 @@ export default function MintAgentPage() {
             window.location.href = "/";
         }, 2000);
     };
+
+    if (!isMounted) return null;
 
     if (!isConnected) {
         return (

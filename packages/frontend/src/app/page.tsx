@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Activity, Power, Wallet as WalletIcon, Cpu } from "lucide-react";
 import Link from "next/link";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 
 // Mock data until we plug in the wagmi reads
@@ -41,6 +42,13 @@ const MOCK_AGENTS = [
 
 export default function DashboardPage() {
   const { address, isConnected } = useAccount();
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  if (!isMounted) return null;
 
   if (!isConnected) {
     return (

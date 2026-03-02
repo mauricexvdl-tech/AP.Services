@@ -33,7 +33,12 @@ const MOCK_LOGS = [
 
 export default function AgentDetailPage({ params }: { params: { id: string } }) {
     const { isConnected } = useAccount();
+    const [isMounted, setIsMounted] = useState(false);
     const [logs, setLogs] = useState(MOCK_LOGS);
+
+    useEffect(() => {
+        setIsMounted(true);
+    }, []);
 
     // Fake log streaming
     useEffect(() => {
@@ -58,6 +63,8 @@ export default function AgentDetailPage({ params }: { params: { id: string } }) 
     const handleTriggerRestart = () => {
         alert("Trigger AporiaAgentNFT.triggerRestart() transaction");
     };
+
+    if (!isMounted) return null;
 
     if (!isConnected) {
         return (
