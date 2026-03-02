@@ -1,0 +1,12 @@
+[package]
+name = "aporia_memory"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spacetimedb = { version = "0.12.0", features = ["macro"] }
+spacetimedb-sdk = "0.12.0" # needed if we share types, though usually module just uses spacetimedb
+serde = { version = "1.0", features = ["derive"] }

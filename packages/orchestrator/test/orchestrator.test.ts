@@ -77,24 +77,14 @@ function createMockContract(
   return {
     canMonitor: vi.fn().mockResolvedValue(opts.canMonitor),
     cooldownRemaining: vi.fn().mockResolvedValue(opts.cooldownRemaining),
-    getBotDetails: vi.fn().mockResolvedValue({
-      imageURI: opts.imageURI,
-      envHash: ethers.ZeroHash,
-      tier: opts.tier,
-      balance: opts.balance,
-      lastRestart: 0n,
-      isActive: opts.isActive,
-      owner: "0x" + "aa".repeat(20),
-    }),
-    bots: vi.fn().mockResolvedValue({
+    getTBA: vi.fn().mockResolvedValue("0x" + "bb".repeat(20)),
+    agents: vi.fn().mockResolvedValue({
       imageURI: opts.imageURI,
       encryptedEnv: opts.encryptedEnv,
       envHash: ethers.ZeroHash,
       tier: opts.tier,
-      balance: opts.balance,
       lastRestart: 0n,
       isActive: opts.isActive,
-      owner: "0x" + "aa".repeat(20),
     }),
     restartCost: vi.fn().mockResolvedValue(opts.restartCost),
     triggerRestart: vi.fn().mockImplementation(async () => {
@@ -121,7 +111,9 @@ function createTestOrchestrator(
   decryptResult: Record<string, string> = { API_KEY: "test-123", DB_URL: "postgres://test" },
 ): ResurrectionOrchestrator {
   const config: OrchestratorConfig = {
-    provider: {} as any,
+    provider: {
+      getBalance: vi.fn().mockResolvedValue(ethers.parseEther("0.01")),
+    } as any,
     signer: {} as any,
     contractAddress: "0x" + "cc".repeat(20),
     deployerSecretKey: new Uint8Array(32),
@@ -132,7 +124,7 @@ function createTestOrchestrator(
   const orchestrator = new ResurrectionOrchestrator(config);
 
   // Replace the internal contract and decrypt method with mocks
-  (orchestrator as any).registry = mockContract;
+  (orchestrator as any).agentNft = mockContract;
   (orchestrator as any).decryptSecrets = vi.fn().mockReturnValue(decryptResult);
 
   return orchestrator;
@@ -156,9 +148,9 @@ describe("ResurrectionOrchestrator", () => {
 
   beforeEach(() => {
     backend = new MockBackend();
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => { });
+    vi.spyOn(console, "error").mockImplementation(() => { });
+    vi.spyOn(console, "warn").mockImplementation(() => { });
   });
 
   describe("Full Pipeline – Success Path", () => {
@@ -178,7 +170,7 @@ describe("ResurrectionOrchestrator", () => {
       // Verify all phases were called
       expect(mockContract.canMonitor).toHaveBeenCalledWith(event.botId);
       expect(mockContract.cooldownRemaining).toHaveBeenCalledWith(event.botId);
-      expect(mockContract.bots).toHaveBeenCalledWith(event.botId);
+      expect(mockContract.agents).toHaveBeenCalledWith(event.botId);
       expect(backend.deployCalls).toHaveLength(1);
       expect(mockContract.triggerRestart).toHaveBeenCalledWith(event.botId);
     });
@@ -196,7 +188,7 @@ describe("ResurrectionOrchestrator", () => {
       const deployCall = backend.deployCalls[0];
       expect(deployCall.imageURI).toBe("custom-image:v2");
       expect(deployCall.tier).toBe(1);
-      expect(deployCall.envVars).toEqual({ API_KEY: "test-123", DB_URL: "postgres://test" });
+      expect(deployCall.envVars).toEqual({ API_KEY: "test-123", DB_URL: "postgres://test", APORIA_AGENT_ID: event.botId, APORIA_MEMORY_URL: "http://memory.aporia.network" });
       expect(deployCall.ports).toEqual([3000]);
     });
 
@@ -243,10 +235,10 @@ describe("ResurrectionOrchestrator", () => {
 
     it("should abort when balance < restart cost", async () => {
       const mockContract = createMockContract({
-        balance: ethers.parseEther("0.0005"),
         restartCost: ethers.parseEther("0.001"),
       });
       const orchestrator = createTestOrchestrator(mockContract, backend);
+      (orchestrator as any).config.provider.getBalance = vi.fn().mockResolvedValue(ethers.parseEther("0.0005"));
 
       const result = await orchestrator.handleRestart(createRestartEvent());
 
@@ -259,7 +251,15 @@ describe("ResurrectionOrchestrator", () => {
   describe("Phase 3: FETCH – Chain data retrieval", () => {
     it("should abort when bot data fetch fails", async () => {
       const mockContract = createMockContract();
-      mockContract.bots.mockRejectedValue(new Error("Network error"));
+      mockContract.agents.mockResolvedValueOnce({
+        imageURI: "docker.io/testbot:latest",
+        encryptedEnv: "0x",
+        envHash: ethers.ZeroHash,
+        tier: 0,
+        lastRestart: 0n,
+        isActive: true,
+      });
+      mockContract.agents.mockRejectedValueOnce(new Error("Network error"));
       const orchestrator = createTestOrchestrator(mockContract, backend);
 
       const result = await orchestrator.handleRestart(createRestartEvent());

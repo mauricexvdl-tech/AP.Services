@@ -17,10 +17,11 @@ import { AkashBackend } from "./akash-backend";
 
 // ─── ABI for reading bot list ────────────────────────────────────
 
-const REGISTRY_ABI_READ = [
-  "function getAllBotIds() view returns (bytes32[])",
-  "function getBotDetails(bytes32 botId) view returns (string imageURI, bytes32 envHash, uint8 tier, uint256 balance, uint256 lastRestart, bool isActive, address owner)",
-  "function canMonitor(bytes32 botId) view returns (bool)",
+const AGENT_NFT_ABI_READ = [
+  "function totalSupply() view returns (uint256)",
+  "function tokenByIndex(uint256 index) view returns (uint256)",
+  "function agents(uint256 tokenId) view returns (string imageURI, bytes encryptedEnv, bytes32 envHash, uint8 tier, uint256 lastRestart, bool isActive)",
+  "function canMonitor(uint256 tokenId) view returns (bool)",
 ];
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -30,7 +31,7 @@ export interface ServiceConfig {
   rpcUrl: string;
   /** Private key of the watchdog operator (sends triggerRestart txs) */
   operatorPrivateKey: string;
-  /** AporiaRegistry contract address */
+  /** AporiaAgentNFT contract address */
   contractAddress: string;
   /** Deployer secret key (Base64 or Uint8Array) for decrypting env vars */
   deployerSecretKey: Uint8Array;
@@ -78,7 +79,7 @@ function resolveBackend(config: ServiceConfig): DeploymentBackend {
 export class OrchestratorService {
   private provider: ethers.JsonRpcProvider;
   private signer: ethers.Wallet;
-  private registry: ethers.Contract;
+  private agentNft: ethers.Contract;
   private orchestrator: ResurrectionOrchestrator;
   private monitor: HeartbeatMonitor;
   private syncInterval: ReturnType<typeof setInterval> | null = null;
@@ -89,7 +90,7 @@ export class OrchestratorService {
     this.config = config;
     this.provider = new ethers.JsonRpcProvider(config.rpcUrl);
     this.signer = new ethers.Wallet(config.operatorPrivateKey, this.provider);
-    this.registry = new ethers.Contract(config.contractAddress, REGISTRY_ABI_READ, this.provider);
+    this.agentNft = new ethers.Contract(config.contractAddress, AGENT_NFT_ABI_READ, this.provider);
 
     const backend = resolveBackend(config);
 
@@ -169,26 +170,32 @@ export class OrchestratorService {
    */
   async syncBots(): Promise<void> {
     try {
-      const botIds: string[] = await this.registry.getAllBotIds();
+      const totalSupply = await this.agentNft.totalSupply();
+      const botIds: string[] = [];
+      for (let i = 0; i < Number(totalSupply); i++) {
+        const tokenId = await this.agentNft.tokenByIndex(i);
+        botIds.push(tokenId.toString());
+      }
+
       const currentBots = new Set(this.monitor.getAllBots().map((b) => b.botId));
       let added = 0;
       let removed = 0;
 
       for (const botId of botIds) {
         try {
-          const canMonitor = await this.registry.canMonitor(botId);
+          const canMonitor = await this.agentNft.canMonitor(botId);
 
           if (canMonitor && !currentBots.has(botId)) {
             // New bot to monitor
-            const details = await this.registry.getBotDetails(botId);
+            const agent = await this.agentNft.agents(botId);
 
             this.monitor.addBot({
               botId,
               // Placeholder URL intentionally fails health checks so the
               // monitor immediately triggers resurrection for newly-registered bots
               url: `http://unknown-${botId.substring(0, 10)}:3000`,
-              imageURI: details.imageURI,
-              tier: Number(details.tier) as Tier,
+              imageURI: agent.imageURI,
+              tier: Number(agent.tier) as Tier,
             });
             added++;
           } else if (!canMonitor && currentBots.has(botId)) {

@@ -1,0 +1,23 @@
+{
+    "name": "@aporia/auth-bridge",
+    "version": "1.0.0",
+    "description": "APORIA SpaceTimeDB Auth Bridge (ERC-6551 Signature Verification)",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "dev": "ts-node src/index.ts"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "dotenv": "^16.3.1",
+        "ethers": "^6.8.0",
+        "express": "^4.18.2"
+    },
+    "devDependencies": {
+        "@types/cors": "^2.8.15",
+        "@types/express": "^4.17.20",
+        "ts-node": "^10.9.1",
+        "typescript": "^5.2.2"
+    }
+}

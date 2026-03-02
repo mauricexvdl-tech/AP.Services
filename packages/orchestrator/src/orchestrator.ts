@@ -19,14 +19,13 @@ import { DeploymentBackend, type DeployRequest, type DeployResponse } from "./ba
 
 // ─── ABI for contract interaction ────────────────────────────────
 
-const REGISTRY_ABI = [
-  "function getBotDetails(bytes32 botId) view returns (string imageURI, bytes32 envHash, uint8 tier, uint256 balance, uint256 lastRestart, bool isActive, address owner)",
-  "function canMonitor(bytes32 botId) view returns (bool)",
-  "function cooldownRemaining(bytes32 botId) view returns (uint256)",
+const AGENT_NFT_ABI = [
+  "function agents(uint256 tokenId) view returns (string imageURI, bytes encryptedEnv, bytes32 envHash, uint8 tier, uint256 lastRestart, bool isActive)",
+  "function canMonitor(uint256 tokenId) view returns (bool)",
+  "function cooldownRemaining(uint256 tokenId) view returns (uint256)",
   "function restartCost(uint8 tier) view returns (uint256)",
-  "function triggerRestart(bytes32 botId)",
-  // Direct access to bots mapping for encrypted env bytes
-  "function bots(bytes32 botId) view returns (string imageURI, bytes encryptedEnv, bytes32 envHash, uint8 tier, uint256 balance, uint256 lastRestart, bool isActive, address owner)",
+  "function triggerRestart(uint256 tokenId)",
+  "function getTBA(uint256 tokenId) view returns (address)"
 ];
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -67,7 +66,7 @@ export interface OrchestratorConfig {
   provider: ethers.Provider;
   /** Wallet (signer) for sending triggerRestart transactions */
   signer: ethers.Signer;
-  /** AporiaRegistry contract address */
+  /** AporiaAgentNFT contract address */
   contractAddress: string;
   /** Deployer secret key for decrypting env vars (Uint8Array) */
   deployerSecretKey: Uint8Array;
@@ -92,14 +91,14 @@ export interface OrchestratorConfig {
  *   const monitor = new HeartbeatMonitor(healthConfig, (event) => orchestrator.handleRestart(event));
  */
 export class ResurrectionOrchestrator {
-  private registry: ethers.Contract;
+  private agentNft: ethers.Contract;
   private config: OrchestratorConfig;
   private activeResurrections: Set<string> = new Set();
   private stats = { total: 0, success: 0, failed: 0 };
 
   constructor(config: OrchestratorConfig) {
     this.config = config;
-    this.registry = new ethers.Contract(config.contractAddress, REGISTRY_ABI, config.signer);
+    this.agentNft = new ethers.Contract(config.contractAddress, AGENT_NFT_ABI, config.signer);
   }
 
   /**
@@ -171,6 +170,10 @@ export class ResurrectionOrchestrator {
       // ─── Phase 5: BUILD (generate deployment config) ──────
       console.log(`[Orchestrator] 🔧 Phase 5/7: BUILD – Generating deployment config...`);
 
+      // Inject memory layer connection details so the agent can recover its state
+      envVars["APORIA_AGENT_ID"] = botId;
+      envVars["APORIA_MEMORY_URL"] = process.env.SPACETIMEDB_AUTH_BRIDGE_URL || "http://memory.aporia.network";
+
       const deployRequest: DeployRequest = {
         botId,
         imageURI: botData.imageURI,
@@ -210,7 +213,7 @@ export class ResurrectionOrchestrator {
 
       let txHash: string;
       try {
-        const tx = await this.registry.triggerRestart(botId);
+        const tx = await this.agentNft.triggerRestart(botId);
         console.log(`[Orchestrator]    Tx sent: ${tx.hash}`);
         const receipt = await tx.wait();
         txHash = receipt.hash;
@@ -263,13 +266,13 @@ export class ResurrectionOrchestrator {
   private async verifyOnChain(botId: string): Promise<{ ok: boolean; error?: string }> {
     try {
       // Check if bot can be monitored (balance >= 2x restart cost + is active)
-      const canMonitor = await this.registry.canMonitor(botId);
+      const canMonitor = await this.agentNft.canMonitor(botId);
       if (!canMonitor) {
         return { ok: false, error: "Bot cannot be monitored (insufficient balance or inactive)" };
       }
 
       // Check cooldown
-      const cooldown: bigint = await this.registry.cooldownRemaining(botId);
+      const cooldown: bigint = await this.agentNft.cooldownRemaining(botId);
       if (cooldown > 0n) {
         const remainingSecs = Number(cooldown);
         const remainingMins = Math.ceil(remainingSecs / 60);
@@ -280,10 +283,12 @@ export class ResurrectionOrchestrator {
       }
 
       // Check balance vs restart cost
-      const details = await this.registry.getBotDetails(botId);
-      const tier = Number(details.tier);
-      const balance: bigint = details.balance;
-      const cost: bigint = await this.registry.restartCost(tier);
+      const agent = await this.agentNft.agents(botId);
+      const tier = Number(agent.tier);
+
+      const tbaAddress = await this.agentNft.getTBA(botId);
+      const balance: bigint = await this.config.provider.getBalance(tbaAddress);
+      const cost: bigint = await this.agentNft.restartCost(tier);
 
       if (balance < cost) {
         return {
@@ -311,12 +316,12 @@ export class ResurrectionOrchestrator {
     tier: Tier;
   } | null> {
     try {
-      // Use the bots() mapping directly to get encryptedEnv bytes
-      const bot = await this.registry.bots(botId);
+      // Use the agents() mapping directly to get encryptedEnv bytes
+      const agent = await this.agentNft.agents(botId);
       return {
-        imageURI: bot.imageURI,
-        encryptedEnv: bot.encryptedEnv, // hex-encoded bytes
-        tier: Number(bot.tier) as Tier,
+        imageURI: agent.imageURI,
+        encryptedEnv: agent.encryptedEnv, // hex-encoded bytes
+        tier: Number(agent.tier) as Tier,
       };
     } catch (error: any) {
       console.error(`[Orchestrator]    ❌ Fetch failed: ${error.message}`);
