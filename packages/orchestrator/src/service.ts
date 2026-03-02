@@ -146,6 +146,13 @@ export class OrchestratorService {
     const syncMs = this.config.syncIntervalMs || 60_000;
     this.syncInterval = setInterval(() => this.syncBots(), syncMs);
 
+    // Listen to real-time minting events so we don't have to wait for the polling interval
+    this.agentNft.on("AgentRegistered", async (tokenId: bigint, owner: string) => {
+      console.log(`\n[Service] 🔔 Real-time event: NFT Minted (#${tokenId}) Owner: ${owner}`);
+      // Give the blockchain RPC a second to index the balance/event, then sync
+      setTimeout(() => this.syncBots(), 2000);
+    });
+
     console.log(`\n[Service] ✅ Monitoring active. Sync every ${syncMs / 1000}s.`);
     console.log(`[Service]    Press Ctrl+C to stop.\n`);
   }
@@ -161,6 +168,8 @@ export class OrchestratorService {
       clearInterval(this.syncInterval);
       this.syncInterval = null;
     }
+
+    this.agentNft.removeAllListeners("AgentRegistered");
 
     console.log("[Service] Stopped.");
   }

@@ -8,6 +8,9 @@ import { Terminal, ShieldAlert, Cpu, Power, ArrowLeft, Send, Activity, ShieldChe
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
+import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { parseEther } from "viem";
+import { APORIA_AGENT_NFT_ADDRESS, APORIA_AGENT_NFT_ABI } from "@/lib/contracts";
 
 export default function MintAgentPage() {
     const { isConnected } = useAccount();
@@ -26,16 +29,42 @@ export default function MintAgentPage() {
     const [tier, setTier] = useState("NANO");
     const [envKeys, setEnvKeys] = useState("");
     const [envValues, setEnvValues] = useState("");
+    const [escrowAmount, setEscrowAmount] = useState("0.05");
+
+    const { writeContractAsync, data: hash, error: writeError } = useWriteContract();
+    const { isLoading: isWaiting, isSuccess } = useWaitForTransactionReceipt({ hash });
+
+    useEffect(() => {
+        if (isSuccess) {
+            window.location.href = "/";
+        }
+    }, [isSuccess]);
 
     const handleMint = async () => {
         setIsMinting(true);
+        try {
+            // Note: NANO=0, LOGIC=1, EXPERT=2
+            const tierMapping: Record<string, number> = { NANO: 0, LOGIC: 1, EXPERT: 2 };
 
-        // Scaffold UI interaction
-        setTimeout(() => {
-            alert("Trigger wagmi writeContract: AporiaAgentNFT.registerAgent()");
+            // Dummy encryption for PoC - in prod this uses NaCL
+            const dummyEncryptedEnv = `0x${Buffer.from(envValues).toString('hex')}`;
+
+            await writeContractAsync({
+                address: APORIA_AGENT_NFT_ADDRESS as `0x${string}`,
+                abi: APORIA_AGENT_NFT_ABI,
+                functionName: 'registerAgent',
+                args: [
+                    imageUri,
+                    dummyEncryptedEnv as `0x${string}`,
+                    tierMapping[tier]
+                ],
+                value: parseEther(escrowAmount)
+            });
+            // Transaction submitted, waiting will trigger useEffect
+        } catch (error) {
+            console.error(error);
             setIsMinting(false);
-            window.location.href = "/";
-        }, 2000);
+        }
     };
 
     if (!isMounted) return null;
@@ -209,12 +238,17 @@ export default function MintAgentPage() {
                                 </p>
                                 <div className="flex items-center gap-3">
                                     <input
-                                        type="text"
-                                        className="flex h-10 w-32 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                                        defaultValue="0.05"
+                                        type="number"
+                                        step="0.01"
+                                        value={escrowAmount}
+                                        onChange={(e) => setEscrowAmount(e.target.value)}
+                                        className="flex h-10 w-32 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                     />
                                     <span className="font-bold">ETH</span>
                                 </div>
+                                {writeError && (
+                                    <p className="text-red-500 text-xs mt-3">{writeError.message.split("\\n")[0]}</p>
+                                )}
                             </div>
                         </motion.div>
                     )}
@@ -238,11 +272,11 @@ export default function MintAgentPage() {
                             size="lg"
                             className="bg-primary hover:bg-primary/90 text-primary-foreground relative overflow-hidden group"
                             onClick={handleMint}
-                            disabled={isMinting}
+                            disabled={isMinting || isWaiting}
                         >
-                            {isMinting ? (
+                            {(isMinting || isWaiting) ? (
                                 <>
-                                    <Activity className="mr-2 h-4 w-4 animate-spin" /> Minting TBA...
+                                    <Activity className="mr-2 h-4 w-4 animate-spin" /> {isWaiting ? "Confirming..." : "Sign in Wallet..."}
                                 </>
                             ) : (
                                 <>
