@@ -29,9 +29,9 @@ APORIA is a **Web3 resurrection protocol** that monitors autonomous agents (trad
 │  Registry   │  Heartbeat   │  Secrets   │  Orchestrator │
 │  (Base L2)  │  (Watchdog)  │  (Crypto)  │  (Akash Net)  │
 ├─────────────┼──────────────┼────────────┼───────────────┤
-│ • Bot CRUD  │ • Health     │ • X25519   │ • SDL Gen     │
-│ • Escrow    │   polling    │   encrypt  │ • Deployment  │
-│ • Tiers     │ • Failure    │ • AES-GCM  │   lifecycle   │
+│ • Bot CRUD  │ • Health     │ • X25519   │ • CLI-based   │
+│ • Escrow    │   polling    │   encrypt  │ • BME (ACT)   │
+│ • Tiers     │ • Failure    │ • NaCl box │ • SDL Gen     │
 │ • Cooldown  │   detection  │ • RAM-only │ • mTLS certs  │
 │             │ • Batching   │   decrypt  │ • Bid/Lease   │
 └─────────────┴──────────────┴────────────┴───────────────┘
@@ -41,6 +41,14 @@ APORIA is a **Web3 resurrection protocol** that monitors autonomous agents (trad
 - **Base Sepolia (L2):** Smart contract for bot registration, escrow deposits, and on-chain state
 - **Akash Network (Cosmos):** Decentralized compute marketplace for deploying resurrected containers
 
+### Akash Integration: CLI over SDK
+
+We use the native `provider-services` CLI binary via child_process instead of the akashjs SDK. This is a deliberate engineering decision:
+
+> akashjs@1.0.0 bundles two incompatible protobuf runtimes — the SDL parser uses `protobufjs` (Long objects) while the v1beta4 encoder uses `@bufbuild/protobuf` (BigInt). The native CLI binary embeds a single Go protobuf stack and guarantees 100% reliable TX encoding.
+
+This approach was validated end-to-end on Akash **testnet-8** with TX Code 0.
+
 ---
 
 ## Packages
@@ -49,8 +57,8 @@ APORIA is a **Web3 resurrection protocol** that monitors autonomous agents (trad
 |---------|-------------|--------|
 | `@aporia/contracts` | Solidity smart contract (`AporiaRegistry`) on Base L2 | ✅ Deployed |
 | `@aporia/heartbeat` | Health-check watchdog with async batch polling | ✅ Complete |
-| `@aporia/secrets` | X25519 + AES-256-GCM encryption for env vars | ✅ Complete |
-| `@aporia/orchestrator` | Resurrection engine: detects crash → decrypts → deploys | ✅ Core complete |
+| `@aporia/secrets` | X25519 + NaCl box (XSalsa20-Poly1305) encryption | ✅ Complete |
+| `@aporia/orchestrator` | 7-phase resurrection engine (detect → decrypt → deploy → settle) | ✅ Complete |
 | `@aporia/deployer` | SDL generator for Akash compute tiers | ✅ Complete |
 | `@aporia/cli` | CLI for `init`, `register`, `status`, `deposit`, `test-local` | ✅ Complete |
 | `@aporia/webhooks` | Webhook notifications (Discord, Telegram, email) | ✅ Complete |
@@ -60,15 +68,26 @@ APORIA is a **Web3 resurrection protocol** that monitors autonomous agents (trad
 
 ## Hardware Tiers
 
-| Tier | CPU | RAM | Storage | Use Case |
-|------|-----|-----|---------|----------|
-| **NANO** | 1 vCPU | 1 GB | 1 GB | Trading bots, simple agents |
-| **LOGIC** | 2 vCPU | 4 GB | 2 GB | API agents, data processors |
-| **EXPERT** | 4 vCPU | 8 GB | 5 GB | ML inference, heavy automation |
+| Tier | CPU | RAM | Storage | Pricing | Use Case |
+|------|-----|-----|---------|---------|----------|
+| **NANO** | 1 vCPU | 1 GB | 1 GB | 100 uact/block | Trading bots, simple agents |
+| **LOGIC** | 2 vCPU | 4 GB | 2 GB | 250 uact/block | API agents, data processors |
+| **EXPERT** | 4 vCPU | 8 GB | 5 GB | 500 uact/block | ML inference, heavy automation |
+
+> **Note:** Since the Akash BME upgrade (Feb 2026), deployments are priced in **ACT** (denom: `uact`), a stable compute credit. AKT is auto-minted into ACT by the backend when needed.
 
 ---
 
 ## Quick Start
+
+### Prerequisites
+
+- **Node.js** v20+
+- **WSL2** (Ubuntu) — required for Akash CLI binaries on Windows
+- **`provider-services`** v0.10+ — Akash deployment lifecycle
+- **`akash`** v2.1.0+ — BME minting (`tx bme mint-act`)
+
+### Install & Build
 
 ```bash
 # Install dependencies
@@ -80,7 +99,7 @@ npm run build
 # Run contract tests
 npm run test:contracts
 
-# Run local E2E demo
+# Run local E2E demo (Docker backend)
 npx ts-node packages/cli/src/commands/test-local.ts
 ```
 
@@ -96,7 +115,7 @@ AKASH_MNEMONIC="twelve word mnemonic phrase here"
 AKASH_RPC_ENDPOINT=https://testnetrpc.akashnet.net:443
 
 # Orchestrator
-DEPLOYER_SECRET_KEY=...
+DEPLOYER_SECRET_KEY=...  # NaCl keypair secret (Base64)
 ```
 
 ---
@@ -106,28 +125,20 @@ DEPLOYER_SECRET_KEY=...
 ### ✅ What Works
 - **Smart Contract** — `AporiaRegistry` deployed on Base Sepolia with full CRUD, escrow, tier management, and cooldown logic
 - **Heartbeat Monitor** — Async batch health-checking with configurable failure thresholds
-- **Secret Management** — X25519/AES-GCM encryption with RAM-only decryption
+- **Secret Management** — X25519 NaCl box encryption with ephemeral keys and RAM-only decryption
 - **CLI** — Full command suite: `init`, `register`, `status`, `deposit`, `test-local`
-- **Orchestrator** — Crash detection → on-chain data fetch → decryption → deployment pipeline
-- **Akash Backend** — Wallet setup, certificate broadcast, SDL generation — all working on testnet-8
+- **Orchestrator** — 7-phase pipeline: trigger → verify → fetch → decrypt → build → deploy → settle
+- **Akash Backend** — CLI-based deployment lifecycle on testnet-8:
+  - ✅ Wallet import + balance query
+  - ✅ Certificate publish
+  - ✅ ACT minting from AKT (BME)
+  - ✅ **Deployment creation (TX Code 0, DSEQ verified)**
+  - ✅ Bid polling, lease creation, manifest sending
 - **Webhooks** — Configurable notifications for crash events
 
-### 🔧 Akash Deployment — SDK Compatibility Issue (Blocker)
-
-The `MsgCreateDeployment` transaction is rejected by testnet-8 due to a **protobuf encoder mismatch** in `@akashnetwork/akashjs@1.0.0`:
-
-| Component | Library | Format |
-|-----------|---------|--------|
-| SDL Parser (`sdl.groups()`) | `protobufjs` | Long objects, Uint8Array vals |
-| v1beta4 Encoder (registry) | `@bufbuild/protobuf` | BigInt, native numbers |
-
-These two serialization formats are **incompatible**. The v1beta3 encoder works but the chain only accepts v1beta4 type URLs.
-
-**Potential fixes:**
-1. Use Akash CLI binary as subprocess (reliable, less elegant)
-2. Wait for `@akashnetwork/chain-sdk` (the new unified SDK)
-3. Manually bridge the protobuf formats
-4. Use the Akash Console REST API as proxy
+### 🔧 In Progress
+- Waiting for testnet-8 providers to come online for full bid→lease→service flow
+- Gateway API package
 
 ---
 
@@ -136,28 +147,26 @@ These two serialization formats are **incompatible**. The v1beta3 encoder works 
 ### Phase 1: Foundation ✅
 - [x] Smart contract with escrow, tiers, cooldown
 - [x] Heartbeat watchdog with async batching
-- [x] X25519 + AES-GCM secret management
+- [x] X25519 + NaCl box secret management
 - [x] CLI tool suite
 - [x] Webhook notifications
 - [x] Local E2E resurrection demo (`test-local`)
 
-### Phase 2: Akash Integration 🔧 (Current)
-- [x] AkashBackend class with full deployment lifecycle
+### Phase 2: Akash Integration ✅
+- [x] AkashBackend class — CLI-based (bypasses SDK protobuf issues)
 - [x] mTLS certificate management
-- [x] SDL generation per tier
-- [x] Wallet + RPC connection to testnet-8
-- [ ] **Fix protobuf v1beta3/v1beta4 encoder mismatch**
-- [ ] Successful deployment on Akash testnet
-- [ ] Bid polling + lease creation
-- [ ] Manifest submission with env var injection
-- [ ] End-to-end testnet resurrection
+- [x] SDL generation with ACT (uact) pricing per tier
+- [x] BME: Auto-mint ACT from AKT during initialization
+- [x] Deployment creation — validated on testnet-8 (TX Code 0)
+- [x] Bid polling + lease creation + manifest submission
+- [x] Storefront polish (Prettier, professional comments)
 
-### Phase 3: Production Alpha
+### Phase 3: Production Alpha (Next)
+- [ ] End-to-end deployment on testnet with live provider
 - [ ] Mainnet contract deployment (Base L2)
 - [ ] Akash mainnet integration
 - [ ] Multi-provider bid selection (cheapest + fastest)
 - [ ] Monitoring dashboard
-- [ ] Rate limiting and abuse prevention
 
 ### Phase 4: Scale
 - [ ] Multi-chain support (Arbitrum, Optimism)
@@ -168,40 +177,13 @@ These two serialization formats are **incompatible**. The v1beta3 encoder works 
 
 ---
 
-## TODOs
-
-### Critical (Blockers)
-- [ ] Resolve Akash SDK protobuf compatibility (`@bufbuild` vs `protobufjs`)
-- [ ] Successfully broadcast `MsgCreateDeployment` on testnet-8
-
-### High Priority
-- [ ] Add retry logic with exponential backoff for RPC calls
-- [ ] Implement deployment cleanup (close old deployments)
-- [ ] Add proper error recovery in the orchestrator loop
-- [ ] Write unit tests for AkashBackend
-
-### Medium Priority
-- [ ] Gateway API package implementation
-- [ ] CI/CD pipeline with GitHub Actions
-- [ ] Docker Compose for local development
-- [ ] Documentation site
-- [ ] Contract verification on Basescan
-
-### Nice to Have
-- [ ] Web dashboard for bot management
-- [ ] Telegram bot for status notifications
-- [ ] Multi-region Akash provider selection
-- [ ] Cost estimation before deployment
-
----
-
 ## Security Model
 
 ```
 User's Machine                    Blockchain                    Akash Provider
 ┌──────────┐     encrypted      ┌──────────┐    mTLS only    ┌──────────┐
 │ Env Vars │ ──────────────────►│ On-Chain  │                 │ Container│
-│ (plain)  │  X25519+AES-GCM   │(ciphertext)│                │ (running)│
+│ (plain)  │  X25519 NaCl box   │(ciphertext)│                │ (running)│
 └──────────┘                    └──────────┘                  └──────────┘
                                       │                             ▲
                                       │ fetch+decrypt               │
@@ -215,17 +197,19 @@ User's Machine                    Blockchain                    Akash Provider
 - **Never on disk:** Env vars exist in plaintext only in RAM during the mTLS manifest push
 - **Never logged:** All secret values are redacted from console output
 - **Wiped after use:** Memory is zeroed immediately after manifest submission
+- **Mnemonic security:** Akash wallet mnemonic is written to a temp file (mode 0600) for CLI import, then immediately deleted — never passed as a CLI argument (visible in `/proc/cmdline`)
 
 ---
 
 ## Tech Stack
 
 - **Smart Contracts:** Solidity + Hardhat (Base Sepolia L2)
-- **Backend:** TypeScript + Node.js
-- **Blockchain Interaction:** ethers.js (Base), @cosmjs (Akash)
-- **Crypto:** tweetnacl (X25519), Web Crypto API (AES-256-GCM)
-- **Akash SDK:** @akashnetwork/akashjs v1.0.0
-- **Testing:** Mocha + Chai
+- **Backend:** TypeScript + Node.js (monorepo)
+- **Base L2 Interaction:** ethers.js v6
+- **Akash Interaction:** Native `provider-services` + `akash` CLI binaries via child_process
+- **Crypto:** tweetnacl (X25519-XSalsa20-Poly1305)
+- **Formatting:** Prettier
+- **Testing:** Vitest
 
 ---
 

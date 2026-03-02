@@ -17,25 +17,19 @@ import crypto from "crypto";
  * @returns true if the signature is valid
  */
 export function verifyAlchemySignature(
-    rawBody: string,
-    signature: string,
-    signingKey: string
+  rawBody: string,
+  signature: string,
+  signingKey: string,
 ): boolean {
-    if (!rawBody || !signature || !signingKey) {
-        return false;
-    }
+  if (!rawBody || !signature || !signingKey) {
+    return false;
+  }
 
-    try {
-        const hmac = crypto
-            .createHmac("sha256", signingKey)
-            .update(rawBody)
-            .digest("hex");
+  try {
+    const hmac = crypto.createHmac("sha256", signingKey).update(rawBody).digest("hex");
 
-        return crypto.timingSafeEqual(
-            Buffer.from(hmac),
-            Buffer.from(signature)
-        );
-    } catch {
-        return false;
-    }
+    return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(signature));
+  } catch {
+    return false;
+  }
 }

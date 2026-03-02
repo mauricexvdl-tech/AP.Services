@@ -4,26 +4,19 @@
  */
 
 export {
-    ResurrectionOrchestrator,
-    type OrchestratorConfig,
-    type ResurrectionResult,
-    type ResurrectionPhase,
+  ResurrectionOrchestrator,
+  type OrchestratorConfig,
+  type ResurrectionResult,
+  type ResurrectionPhase,
 } from "./orchestrator";
 
 export {
-    type DeploymentBackend,
-    type DeployRequest,
-    type DeployResponse,
-    DockerBackend,
+  type DeploymentBackend,
+  type DeployRequest,
+  type DeployResponse,
+  DockerBackend,
 } from "./backends";
 
-export {
-    AkashBackend,
-    type AkashConfig,
-} from "./akash-backend";
+export { AkashBackend, type AkashConfig } from "./akash-backend";
 
-export {
-    OrchestratorService,
-    type ServiceConfig,
-} from "./service";
-
+export { OrchestratorService, type ServiceConfig } from "./service";
