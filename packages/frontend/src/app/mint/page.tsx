@@ -14,7 +14,7 @@ import { APORIA_AGENT_NFT_ADDRESS, APORIA_AGENT_NFT_ABI } from "@/lib/contracts"
 import { baseSepolia } from "wagmi/chains";
 
 export default function MintAgentPage() {
-    const { isConnected } = useAccount();
+    const { isConnected, chain } = useAccount();
     const [isMounted, setIsMounted] = useState(false);
     const [step, setStep] = useState(1);
 
@@ -36,7 +36,6 @@ export default function MintAgentPage() {
     const { isLoading: isWaiting, isSuccess } = useWaitForTransactionReceipt({ hash });
 
     // Switch chain logic
-    const chainId = useChainId();
     const { switchChainAsync, isPending: isSwitching } = useSwitchChain();
 
     useEffect(() => {
@@ -48,10 +47,9 @@ export default function MintAgentPage() {
     const handleMint = async () => {
         setIsMinting(true);
         try {
-            if (chainId !== baseSepolia.id) {
-                console.log("Switching chain to Base Sepolia...");
+            if (chain?.id !== baseSepolia.id) {
+                console.log(`Current chain is ${chain?.id}, switching to ${baseSepolia.id}...`);
                 await switchChainAsync({ chainId: baseSepolia.id });
-                // We'll let the user click again after switching to avoid race conditions
                 setIsMinting(false);
                 return;
             }
@@ -71,7 +69,8 @@ export default function MintAgentPage() {
                     dummyEncryptedEnv as `0x${string}`,
                     tierMapping[tier]
                 ],
-                value: parseEther(escrowAmount)
+                value: parseEther(escrowAmount),
+                chainId: baseSepolia.id
             });
             // Transaction submitted, waiting will trigger useEffect
         } catch (error) {
@@ -291,7 +290,7 @@ export default function MintAgentPage() {
                                 <>
                                     <Activity className="mr-2 h-4 w-4 animate-spin" /> {isSwitching ? "Switching Network..." : (isWaiting ? "Confirming..." : "Sign in Wallet...")}
                                 </>
-                            ) : chainId !== baseSepolia.id ? (
+                            ) : chain?.id !== baseSepolia.id ? (
                                 <>
                                     <ShieldAlert className="mr-2 h-4 w-4" /> Switch to Base Sepolia
                                 </>
