@@ -1,5 +1,5 @@
-export const APORIA_AGENT_NFT_ADDRESS = "0x"; // We will inject this after a deployment
-export const APORIA_ACCOUNT_IMPLEMENTATION = "0x"; // Will inject
+export const APORIA_AGENT_NFT_ADDRESS = "0xF869d69d30EB467921Cf22c57D669294B9F29E0E";
+export const APORIA_ACCOUNT_IMPLEMENTATION = "0xd4cddACFd7D9A691eD65F3cdD50AAc162E8f0df0";
 export const ERC6551_REGISTRY = "0x000000006551c19487814612e58FE06813775758"; // Standard Base Sepolia Address
 
 export const APORIA_AGENT_NFT_ABI = [
