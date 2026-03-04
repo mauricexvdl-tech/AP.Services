@@ -3,15 +3,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type State, WagmiProvider } from "wagmi";
 import { OnchainKitProvider } from "@coinbase/onchainkit";
-import { base, baseSepolia } from "wagmi/chains";
+import { baseSepolia } from "wagmi/chains";
 import { http, createConfig } from "wagmi";
 
 // Wagmi config for Base L2 networks
 const config = createConfig({
-    chains: [baseSepolia, base],
+    chains: [baseSepolia],
     transports: {
         [baseSepolia.id]: http(),
-        [base.id]: http(),
     },
 });
 
