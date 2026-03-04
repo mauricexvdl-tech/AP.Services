@@ -8,7 +8,7 @@ import { Terminal, ShieldAlert, Cpu, Power, ArrowLeft, Send, Activity, ShieldChe
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { useWriteContract, useWaitForTransactionReceipt, useSwitchChain, useChainId } from "wagmi";
 import { parseEther } from "viem";
 import { APORIA_AGENT_NFT_ADDRESS, APORIA_AGENT_NFT_ABI } from "@/lib/contracts";
 import { baseSepolia } from "wagmi/chains";
@@ -35,6 +35,10 @@ export default function MintAgentPage() {
     const { writeContractAsync, data: hash, error: writeError } = useWriteContract();
     const { isLoading: isWaiting, isSuccess } = useWaitForTransactionReceipt({ hash });
 
+    // Switch chain logic
+    const chainId = useChainId();
+    const { switchChainAsync, isPending: isSwitching } = useSwitchChain();
+
     useEffect(() => {
         if (isSuccess) {
             window.location.href = "/";
@@ -44,6 +48,14 @@ export default function MintAgentPage() {
     const handleMint = async () => {
         setIsMinting(true);
         try {
+            if (chainId !== baseSepolia.id) {
+                console.log("Switching chain to Base Sepolia...");
+                await switchChainAsync({ chainId: baseSepolia.id });
+                // We'll let the user click again after switching to avoid race conditions
+                setIsMinting(false);
+                return;
+            }
+
             // Note: NANO=0, LOGIC=1, EXPERT=2
             const tierMapping: Record<string, number> = { NANO: 0, LOGIC: 1, EXPERT: 2 };
 
@@ -59,8 +71,7 @@ export default function MintAgentPage() {
                     dummyEncryptedEnv as `0x${string}`,
                     tierMapping[tier]
                 ],
-                value: parseEther(escrowAmount),
-                chainId: baseSepolia.id
+                value: parseEther(escrowAmount)
             });
             // Transaction submitted, waiting will trigger useEffect
         } catch (error) {
@@ -274,11 +285,15 @@ export default function MintAgentPage() {
                             size="lg"
                             className="bg-primary hover:bg-primary/90 text-primary-foreground relative overflow-hidden group"
                             onClick={handleMint}
-                            disabled={isMinting || isWaiting}
+                            disabled={isMinting || isWaiting || isSwitching}
                         >
-                            {(isMinting || isWaiting) ? (
+                            {(isMinting || isWaiting || isSwitching) ? (
                                 <>
-                                    <Activity className="mr-2 h-4 w-4 animate-spin" /> {isWaiting ? "Confirming..." : "Sign in Wallet..."}
+                                    <Activity className="mr-2 h-4 w-4 animate-spin" /> {isSwitching ? "Switching Network..." : (isWaiting ? "Confirming..." : "Sign in Wallet...")}
+                                </>
+                            ) : chainId !== baseSepolia.id ? (
+                                <>
+                                    <ShieldAlert className="mr-2 h-4 w-4" /> Switch to Base Sepolia
                                 </>
                             ) : (
                                 <>
