@@ -7,6 +7,7 @@
         "test": "hardhat test",
         "clean": "hardhat clean",
         "deploy:sepolia": "hardhat run scripts/deploy.ts --network baseSepolia",
+        "deploy:v2-sepolia": "hardhat run scripts/deploy-base-sepolia.ts --network baseSepolia",
         "deploy:base": "hardhat run scripts/deploy.ts --network base",
         "verify": "hardhat verify --network baseSepolia"
     },
