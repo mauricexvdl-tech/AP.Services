@@ -11,6 +11,7 @@ import { motion } from "framer-motion";
 import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { parseEther } from "viem";
 import { APORIA_AGENT_NFT_ADDRESS, APORIA_AGENT_NFT_ABI } from "@/lib/contracts";
+import { baseSepolia } from "wagmi/chains";
 
 export default function MintAgentPage() {
     const { isConnected } = useAccount();
@@ -58,7 +59,8 @@ export default function MintAgentPage() {
                     dummyEncryptedEnv as `0x${string}`,
                     tierMapping[tier]
                 ],
-                value: parseEther(escrowAmount)
+                value: parseEther(escrowAmount),
+                chainId: baseSepolia.id
             });
             // Transaction submitted, waiting will trigger useEffect
         } catch (error) {
