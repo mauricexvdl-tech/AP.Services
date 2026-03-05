@@ -51,7 +51,7 @@ export default function DashboardPage() {
 
 function AgentGrid() {
   // 1. Get total supply
-  const { data: totalSupplyRaw } = useReadContract({
+  const { data: totalSupplyRaw, error: supplyError } = useReadContract({
     address: APORIA_AGENT_NFT_ADDRESS as `0x${string}`,
     abi: APORIA_AGENT_NFT_ABI,
     functionName: 'totalSupply',
@@ -61,7 +61,7 @@ function AgentGrid() {
   // 2. Prep calls for tokens
   const tokenIds = Array.from({ length: totalSupply }, (_, i) => BigInt(i));
 
-  const { data: tokensData } = useReadContracts({
+  const { data: tokensData, error: tokensError } = useReadContracts({
     contracts: tokenIds.flatMap(id => [
       {
         address: APORIA_AGENT_NFT_ADDRESS as `0x${string}`,
@@ -110,6 +110,14 @@ function AgentGrid() {
       }
     }
   }
+
+  useEffect(() => {
+    console.log("WAGMI DASHBOARD DEBUG:");
+    console.log("- Total Supply Raw:", totalSupplyRaw);
+    console.log("- Supply Error:", supplyError);
+    console.log("- Tokens Error:", tokensError);
+    console.log("- Parsed Agents array:", agents);
+  }, [totalSupplyRaw, supplyError, tokensError, agents.length]);
 
   return (
     <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
