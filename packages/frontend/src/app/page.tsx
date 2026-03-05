@@ -84,7 +84,7 @@ function AgentGrid() {
     ])
   });
 
-  const agents = [];
+  const agents: any[] = [];
 
   if (tokensData) {
     for (let i = 0; i < totalSupply; i++) {
