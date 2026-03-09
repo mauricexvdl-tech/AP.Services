@@ -24,36 +24,120 @@ const AGENT = {
     insurancePremium: "0.01 ETH",
 };
 
-const MOCK_LOGS = [
-    { time: "19:42:01", role: "system", msg: "[Heartbeat] OK - CPU 12%, RAM 45MB" },
-    { time: "19:42:05", role: "agent", msg: "Scanning Uniswap V3 pools for arb opportunities..." },
-    { time: "19:42:15", role: "agent", msg: "No profitable routes found. Sleeping for 10s." },
-    { time: "19:42:25", role: "system", msg: "[Memory] SpaceTimeDB snapshot saved." },
-];
+const SPACETIMEDB_URL = process.env.NEXT_PUBLIC_SPACETIMEDB_URL || "ws://localhost:3000";
+const DATABASE_NAME = "aporia_memory";
+
+interface LogEntry {
+    time: string;
+    role: string;
+    msg: string;
+}
 
 export default function AgentDetailPage({ params }: { params: { id: string } }) {
     const { isConnected } = useAccount();
     const [isMounted, setIsMounted] = useState(false);
-    const [logs, setLogs] = useState(MOCK_LOGS);
+    const [logs, setLogs] = useState<LogEntry[]>([
+        { time: new Date().toLocaleTimeString('en-US', { hour12: false }), role: "system", msg: "[Memory] Connecting to SpaceTimeDB WebSocket..." }
+    ]);
+    const [wsConnected, setWsConnected] = useState(false);
 
     useEffect(() => {
         setIsMounted(true);
     }, []);
 
-    // Fake log streaming
+    // SpaceTimeDB WebSocket Subscription
     useEffect(() => {
-        const interval = setInterval(() => {
-            setLogs((prev) => [
-                ...prev,
-                {
+        if (!isMounted) return;
+
+        // SpaceTimeDB specific WebSocket endpoint
+        const wsUrl = `${SPACETIMEDB_URL}/database/api/v1/subscribe/websocket/${DATABASE_NAME}`;
+        console.log(`[SpaceTimeDB] Connecting to ${wsUrl}`);
+
+        let ws: WebSocket;
+
+        try {
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                console.log("[SpaceTimeDB] Socket opened");
+                setWsConnected(true);
+
+                // Subscribe to the AgentState and ConversationHistory tables for this specific agent
+                // Note: since id comes from the pathname params, we query where owner_address matches.
+                // But in MVP we might just subscribe to all and filter client-side if the query language is complex.
+                const subscribeQuery = `
+                    SELECT * FROM ConversationHistory WHERE owner_address = '${params.id}';
+                `;
+
+                ws.send(JSON.stringify({
+                    subscribe: {
+                        query_strings: [subscribeQuery]
+                    }
+                }));
+
+                setLogs(prev => [...prev.slice(-100), {
                     time: new Date().toLocaleTimeString('en-US', { hour12: false }),
-                    role: "agent",
-                    msg: "Polling mempool for pending transactions...",
-                },
-            ].slice(-10)); // keep last 10
-        }, 5000);
-        return () => clearInterval(interval);
-    }, []);
+                    role: "system",
+                    msg: `[Memory] Subscribed to memory stream for Agent ${params.id.substring(0, 6)}...`
+                }]);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    // SpaceTimeDB sends TableUpdate events
+                    if (data.TransactionUpdate && data.TransactionUpdate.subscription_update) {
+                        const updates = data.TransactionUpdate.subscription_update.table_updates;
+
+                        for (const update of updates) {
+                            if (update.table_name === "ConversationHistory") {
+                                for (const row of update.table_row_operations) {
+                                    if (row.op === "insert") {
+                                        // Schema: owner_address(0), seq(1), role(2), content(3), timestamp(4)
+                                        const rowData = row.row;
+                                        setLogs(prev => {
+                                            const newLogs = [...prev, {
+                                                time: new Date().toLocaleTimeString('en-US', { hour12: false }),
+                                                role: rowData[2],
+                                                msg: rowData[3]
+                                            }];
+                                            return newLogs.slice(-50); // Keep last 50 messages
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error("[SpaceTimeDB] Parse error", e);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error("[SpaceTimeDB] Socket error", error);
+                setLogs(prev => [...prev.slice(-100), {
+                    time: new Date().toLocaleTimeString('en-US', { hour12: false }),
+                    role: "system",
+                    msg: `[Memory] Connection error. Is SpaceTimeDB running?`
+                }]);
+            };
+
+            ws.onclose = () => {
+                console.log("[SpaceTimeDB] Socket closed");
+                setWsConnected(false);
+            };
+
+        } catch (e) {
+            console.error("[SpaceTimeDB] Init error", e);
+        }
+
+        return () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+        };
+    }, [isMounted, params.id]);
 
     const handleFund = () => {
         // Scaffold smart contract interaction
@@ -191,7 +275,9 @@ export default function AgentDetailPage({ params }: { params: { id: string } }) 
                             <CardTitle className="text-lg flex items-center gap-2">
                                 <Terminal className="h-5 w-5 text-primary" />
                                 SpaceTimeDB Memory
-                                <Badge variant="outline" className="ml-2 font-mono text-[10px] bg-background">Live Context</Badge>
+                                <Badge variant={wsConnected ? "success" : "destructive"} className="ml-2 font-mono text-[10px] bg-background">
+                                    {wsConnected ? "Live Connected" : "Offline"}
+                                </Badge>
                             </CardTitle>
                             <CardDescription>
                                 Real-time hot state and interaction history synced from WASM modules.
